@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <list>
 #include <stdexcept>
@@ -79,7 +80,11 @@ class Hnsw {
   struct Node {
     Vector vec;
     std::vector<Node *> neighbors;
-    Node *next_layer; /* Points to the /same/ node in the next layer of the layered graph */
+    /* Each node is on exactly one layer */
+    size_t layer;
+    size_t id;
+     /* Points to the /same/ node in the next layer of the layered graph */
+    Node *next_layer = nullptr;
 
     Node(size_t size) : vec(size) {}
 
@@ -92,100 +97,175 @@ class Hnsw {
 
   Hnsw(size_t efConstruction, size_t layers, size_t m);
 
-  /* Implement this */
-  void Insert(Node node, size_t l);
-  /******************/
+  size_t RandomLevel();
 
-  Node *FindNn(const Node &node);
+  void Insert(std::vector<float> vec, size_t l);
+  void Insert(Node query, size_t l);
+
+  std::vector<Node *> FindNearest(const Node &query, size_t neighbors); 
+
  private:
   size_t efConstruction_ = 0; /* Number of NN to use as entry points when descending to next layer */
-  size_t mL_ = 0; /* Maximum depth */
+  size_t l_ = 0; /* Number of layers */
   size_t m_ = 0; /* Number of NN to connect to when layer <= l */
-  /**
-   * std::vector from level 0 to mL
-   * Each entry in the vector is a list of Nodes
-   */
   std::vector<std::list<Node>> layers_;
+
+  std::vector<Node *> FindNn(const Node &quer, size_t l, size_t n, Node *entry);
 };
 
 Hnsw::Hnsw(size_t efConstruction, size_t layers, size_t m) {
   m_ = m;
-  mL_ = layers;
+  l_ = layers;
   efConstruction_ = efConstruction;
-  layers_.reserve(layers);
+  layers_.resize(layers);
 }
 
-void Hnsw::Insert(Node node, size_t l) {
-  /* Let first entry node be the first node in the top layer */
-  Node *entry_node = &layers_[mL_ - 1].front();
+/* Pick a random level from zero to mL with logarithmic falloff */
+size_t Hnsw::RandomLevel() {
+  double uniform = (double)rand() / (double)RAND_MAX;
+  double result = -log(uniform) * (1.0 / m_);
+  if (result >= l_) result = l_;
+  return result;
+}
 
-  /* Step 1: above l */
-  for (size_t layer = mL_ - 1; layer > l; --layer) {
-    Node *next_entry_node = entry_node;
-
-    /* Greedy search over all neighbors: find the one that's closest to the query */
-    do {
-      for (const auto &nd : entry_node->neighbors)
-        if (nd->vec.Distance(node.vec) < next_entry_node->vec.Distance(node.vec))
-          next_entry_node = nd;
-
-    } while (next_entry_node != entry_node); /* break if there are no neighbor nodes closer than entry_... */
-    entry_node = next_entry_node->next_layer;
-  }
-
-  /* Step 2: l.e.q. l */
-  auto cmp = [&node](Node *left, Node *right) {
-    return left->vec.Distance(node.vec) > right->vec.Distance(node.vec);
-  };
-  std::priority_queue<Node *, std::vector<Node *>, decltype(cmp)> closest_nodes(cmp);
+void Hnsw::Insert(Node query, size_t l) {
   std::vector<Node *> entry_points;
   
-  /* Start with our closest node from the upper layers */
-  entry_points.push_back(entry_node);
+  /**** Step 1: greater than l. ****/
+  size_t layer = l_ - 1;
+  Node *entry = nullptr;
+  for (; layer > l; --layer) {
+    entry_points = FindNn(query, layer, 1, entry);
+    entry = entry_points.size() ? entry_points.back()->next_layer : nullptr;
+  }
+
+  if (entry_points.size()) {
+    entry_points.clear();
+    entry_points.push_back(entry->next_layer);
+  }
+
+  /**** Step 2: less than or equal to l. ****/
 
   /* Node on layer above us */
-  Node *last_layer = nullptr;
-  
-  for (size_t layer = l; layer >= 0; --layer) {
-    /* Add the new node to this layer in the hnsw collection */
-    layers_[l].emplace_back(std::move(node));
-    Node *new_node = &layers_[l].back();
+  Node *prev_layer = nullptr;
+  Node *new_node = nullptr;
 
-    if (last_layer != nullptr)
-      last_layer->next_layer = new_node;
-    
-    last_layer = new_node;
+  for (; layer >= 0; --layer) {
+    std::vector<Node *> closest;
 
     /* Get all the closest nodes starting from the entry points */
-    for (Node *n = entry_points.back(); !entry_points.empty(); entry_points.pop_back()) {
-      Node *next_n = n;
-      /* Greedy search over all neighbors: find the one that's closest to the query */
-      do {
-        for (const auto &nd : n->neighbors)
-          if (nd->vec.Distance(node.vec) < next_n->vec.Distance(node.vec)) {
-            next_n = nd;
-            closest_nodes.push(nd);
-          }
-      } while (next_n != n); /* break if there are no neighbor nodes closer than n */
+    if (entry_points.empty()) entry_points.push_back(nullptr);
+
+    for (Node *entry = entry_points.back(); !entry_points.empty(); entry_points.pop_back()) {
+      std::vector<Node *> closest_to_entry = FindNn(query, layer, efConstruction_, entry);
+      closest.insert(closest.end(), closest_to_entry.begin(), closest_to_entry.end());
     }
+    auto cmp = [&query](Node *l, Node *r) -> bool {
+      return l->vec.Distance(query.vec) < r->vec.Distance(query.vec);
+    };
+    std::sort(closest.begin(), closest.end(), cmp);
+
+    /* Add the node to the layer */
+    layers_[layer].emplace_back(query);
+
+    new_node = &layers_[layer].back();
+    new_node->layer = layer;
+
+    if (prev_layer != nullptr)
+      prev_layer->next_layer = new_node;
+    prev_layer = new_node;
 
     /* Make links */
     for (size_t e = 0; e < efConstruction_; ++e) {
-      if (closest_nodes.empty()) break;
+      if (closest.size() <= e) break;
 
-      Node *nn = closest_nodes.top();
-      closest_nodes.pop();
+      Node *nn = closest[e];
 
-      entry_points.push_back(nn);
+      entry_points.push_back(nn->next_layer);
 
       if (e >= m_) continue;
 
       /* Only add edges if we're less than m, else just add entry points*/
 
+      if (nn->layer != new_node->layer)
+        std::cout << "layer mismatch!" << std::endl;
+
       nn->neighbors.push_back(new_node);
       new_node->neighbors.push_back(nn);
     }
+
+    if (layer == 0) break;
   }
+}
+
+void Hnsw::Insert(std::vector<float> vec, size_t l) {
+  Node nn(std::move(vec));
+  Insert(std::move(nn), l);
+}
+
+/**
+ * Returns a vector of the 'n' nearest neighbors to node on layer 'l',
+ * starting from entry Node 'entry'.
+ * 
+ * If 'entry' is nullptr then we start searching from an arbitrary node
+ * on layer 'l'.
+ * 
+ * May return fewer than 'n' nodes.
+ */
+std::vector<Hnsw::Node *> Hnsw::FindNn(const Node &query, size_t l, size_t n, Node *entry) {
+  auto cmp = [&query](Node *l, Node *r) {
+    return l->vec.Distance(query.vec) > r->vec.Distance(query.vec);
+  };
+  std::priority_queue<Node *, std::vector<Node *>, decltype(cmp)> closest_nodes(cmp);
+
+  /**
+   * No entry node specified, start at the beginning of the std::list for 'l'.
+   */
+  if (!entry) {
+    if (layers_[l].empty()) return std::vector<Hnsw::Node *>();
+    entry = &layers_[l].front();
+  }
+  
+  closest_nodes.push(entry);
+
+  for (Node *next = entry;;) {
+    if (entry->neighbors.empty()) break;
+    
+    for (const auto &node : entry->neighbors)
+      if (node->vec.Distance(query.vec) < next->vec.Distance(query.vec)) {
+        closest_nodes.push(node);
+        next = node;
+      }
+
+    if (next == entry) break;
+    
+    entry = next;
+  }
+
+  /**
+   * SLOW -- convert the pqueue to a vector.
+   * There may be a faster way to do this:
+   * https://stackoverflow.com/questions/1185252/is-there-a-way-to-access-the-underlying-container-of-stl-container-adaptors
+   */
+  std::vector<Node *> res;
+  for (; n > 0; --n) {
+    if (closest_nodes.empty()) break;
+    res.push_back(closest_nodes.top());
+    closest_nodes.pop();
+  }
+
+  return res;
+}
+
+std::vector<Hnsw::Node *> Hnsw::FindNearest(const Node &query, size_t neighbors) {
+  std::vector<Node *> points;
+  Node *entry = nullptr;
+  for (size_t layer = l_ - 1; layer > 0; --layer) {
+    points = FindNn(query, layer, 1, entry);
+    entry = points.size() ? points.back()->next_layer : nullptr;
+  }
+  points = FindNn(query, 0, neighbors, entry);
+  return points;
 }
 
 void PriorityQueueTest() {
@@ -226,17 +306,51 @@ void PriorityQueueTest() {
   return;
 }
 
-int main(int argc, char **argv) {
+/* Insert a bunch of RGB colors into a hnsw and find the most similar one */
+void RgbTest(size_t num_colors) {
   Hnsw hnsw(5, 5, 2);
 
-  /* Insert a bunch of RGB colors and find the most similar one */
+  srand(3);
 
-  srand((uint64_t)argv[0]);
+  std::vector<Hnsw::Node> nodes;
 
-  for (size_t c = 0; c < 256; ++c) {
+  Hnsw::Node query(3);
+
+  /* Add a bunch of random colors to the graph */
+  for (size_t c = 0; c < num_colors; ++c) {
     float r = rand() % 256;
     float g = rand() % 256;
     float b = rand() % 256;
+    size_t level = hnsw.RandomLevel();
+
     Hnsw::Node n({ r, g, b });
+    n.id = c;
+    nodes.push_back(n);
+    hnsw.Insert(std::move(n), level);
   }
+
+  /** 
+   * Choose one of the colors and modify it slightly for our query.
+   * We expect the color that we chose to be our nearest neighbor.
+   */
+  Hnsw::Node &neighbor = nodes[rand() % num_colors];
+
+  query.vec.Set(0, neighbor.vec.Get(0));
+  query.vec.Set(1, neighbor.vec.Get(1) + 1.0);
+  query.vec.Set(2, neighbor.vec.Get(2) - 1.0);
+
+  std::vector<Hnsw::Node *> neighbors = hnsw.FindNearest(query, 1);
+  
+  std::cout << "neighbors.size() is " << neighbors.size() << std::endl;
+  std::cout << "neighbor vector was \n" << "{ " << neighbor.vec.Print() << " }" << std::endl;
+  std::cout << "query vector was \n" << "{ " << query.vec.Print() << " }" << std::endl;
+
+  if (neighbors.size())
+    std::cout << "nearest vector was \n" << "{ " << neighbors[0]->vec.Print() << " }" << std::endl;
+  else
+    std::cout << "error -- we expected some output from the graph but got none." << std::endl;
+}
+
+int main(int argc, char **argv) {
+  RgbTest(256);
 }
