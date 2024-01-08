@@ -22,7 +22,7 @@ class Vector {
  public:
   Vector(size_t size) {
     if (!size) throw std::runtime_error("cannot initialize Vector with size 0");
-    data_.reserve(size);
+    data_.resize(size);
     size_ = size;
   }
 
@@ -141,7 +141,7 @@ void Hnsw::Insert(Node query, size_t l) {
 
   if (entry_points.size()) {
     entry_points.clear();
-    entry_points.push_back(entry->next_layer);
+    entry_points.push_back(entry);
   }
 
   /**** Step 2: less than or equal to l. ****/
