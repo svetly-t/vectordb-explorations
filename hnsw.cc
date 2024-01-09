@@ -9,6 +9,12 @@
 #include <math.h>
 #include <stdlib.h>
 
+#ifdef _WIN32
+#include <Windows.h>
+#include <Psapi.h>
+#pragma comment( lib, "Psapi.lib" )
+#endif
+
 /* Returns 000..000 if the bool is false, else return 111...111 */
 inline uint32_t ZeroIfTrue(bool stmt) {
   return ~(!stmt - 1ull);
@@ -351,6 +357,69 @@ void RgbTest(size_t num_colors) {
     std::cout << "error -- we expected some output from the graph but got none." << std::endl;
 }
 
+void PrintMemUsage() {
+  #ifdef _WIN32
+    DWORD pid = GetCurrentProcessId();
+    HANDLE handle = OpenProcess(PROCESS_VM_READ, false, pid);
+    PROCESS_MEMORY_COUNTERS counters;
+    GetProcessMemoryInfo(handle, &counters, counters.cb);
+    CloseHandle(handle);
+    std::cout << "PROCESS_MEMORY_COUNTERS: {" << std::endl;
+    std::cout << "\tpage file usage (bytes): " << counters.PagefileUsage << std::endl;
+    std::cout << "\tpeak page file usage (bytes): " << counters.PeakPagefileUsage << std::endl;
+    std::cout << "}" << std::endl;
+  #else
+    
+  #endif
+}
+
+void SizeTest(size_t count, size_t vector_length, size_t neighbors_per_node) {
+  std::cout << "Sizeof a Vector is " << sizeof(struct Vector) << std::endl;
+  std::cout << "Sizeof a std::vector<float> is " << sizeof(std::vector<float>) << std::endl;
+  std::cout << "Sizeof a Node is " << sizeof(struct Hnsw::Node) << std::endl;
+
+  std::cout << "allocating " << count << " vectors..." << std::endl;
+
+  Vector **vec = new Vector*[count];
+  for (size_t c = 0; c < count; ++c)
+    vec[c] = new Vector(vector_length);
+
+  PrintMemUsage();
+
+  std::cout << "faulting-in " << count << " vectors..." << std::endl;
+
+  for (size_t c = 0; c < count; ++c)
+    for (size_t v = 0; v < vector_length; ++v)
+      vec[c]->Set(v, v + c);
+
+  PrintMemUsage();
+
+  std::cout << "allocating " << count << " nodes, each of vector_length " << vector_length << "..." << std::endl;
+
+  Hnsw::Node **nodes = new Hnsw::Node*[count];
+  for (size_t c = 0; c < count; ++c)
+    nodes[c] = new Hnsw::Node(vector_length);
+
+  PrintMemUsage();
+
+  std::cout << "faulting-in " << count << " nodes..." << std::endl;
+  
+  for (size_t c = 0; c < count; ++c)
+    for (size_t v = 0; v < vector_length; ++v)
+      nodes[c]->vec.Set(v, v + c);
+
+  PrintMemUsage();
+
+  std::cout << "faulting-in " << count << " node neighbors..." << std::endl;
+  
+  for (size_t c = 0; c < count; ++c)
+    for (size_t n = 0; n < neighbors_per_node; ++n)
+      nodes[c]->neighbors.push_back(nodes[n]);
+
+  PrintMemUsage();
+}
+
 int main(int argc, char **argv) {
-  RgbTest(256);
+  SizeTest(256, 4, 2);
+  return 0;
 }
