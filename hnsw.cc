@@ -10,9 +10,19 @@
 #include <stdlib.h>
 
 #ifdef _WIN32
+
 #include <Windows.h>
 #include <Psapi.h>
 #pragma comment( lib, "Psapi.lib" )
+
+#elif __linux__
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
 #endif
 
 /* Returns 000..000 if the bool is false, else return 111...111 */
@@ -359,6 +369,7 @@ void RgbTest(size_t num_colors) {
 
 void PrintMemUsage() {
   #ifdef _WIN32
+    /* A bit of fun with windows sdk tools */
     DWORD pid = GetCurrentProcessId();
     HANDLE handle = OpenProcess(PROCESS_VM_READ, false, pid);
     PROCESS_MEMORY_COUNTERS counters;
@@ -368,8 +379,56 @@ void PrintMemUsage() {
     std::cout << "\tpage file usage (bytes): " << counters.PagefileUsage << std::endl;
     std::cout << "\tpeak page file usage (bytes): " << counters.PeakPagefileUsage << std::endl;
     std::cout << "}" << std::endl;
-  #else
+  #elif __linux__
+    /* For linux, dump the Vm* info from proc */
+    int rc;
+    int fd = open("/proc/self/status", O_RDONLY);
+    if (fd < 0) {
+      std::cout << "failed to open /proc/self/status errno " << errno << std::endl;
+      exit(1);
+    }
+
+    /* Read and print starting from VmPeak and going to HugetlbPages */
+    char buf[256] = {0};
     
+    /* Step 1 seek to first V */
+    size_t off = 0;
+    for (size_t V = 0; buf[V] != 'V'; V = 0) {
+      if (pread(fd, buf, sizeof(buf), off) < 0) {
+        std::cout << "pread /proc/self/status errno " << errno << std::endl;
+        exit(1);
+      }
+      /* Loop to the first capital V */
+      for (; V < sizeof(buf); ++V, ++off)
+        if (buf[V] == 'V')
+          break;
+    }
+    
+    /* Step 2 offset is @ VmPeak, print until HugetlbPages */
+    std::cout << "/proc/self/status: " << std::endl;
+    for (size_t H = 0;; H = 0) {
+      if (pread(fd, buf, sizeof(buf), off) < 0) {
+        std::cout << "pread /proc/self/status errno " << errno << std::endl;
+        exit(1);
+      }
+      /* Check if HugetlbPages is in this block */
+      for (; H < sizeof(buf) - sizeof("HugetlbPages"); ++H, ++off)
+        if (buf[H] == 'H')
+          if (!strncmp(&buf[H], "HugetlbPages", sizeof("HugetlbPages") - 1)) {
+            /* Don't need to go further than this -- close the fd */
+            close(fd);
+            fd = -1;
+            break;
+          }
+      /* However far we've gotten in the buffer, print */
+      buf[H] = '\0';
+      std::cout << buf;
+      /* Exit if fd was closed. */
+      if (fd < 0) break;
+    }
+    
+    close(fd);
+    std::cout << std::endl;
   #endif
 }
 
@@ -377,6 +436,10 @@ void SizeTest(size_t count, size_t vector_length, size_t neighbors_per_node) {
   std::cout << "Sizeof a Vector is " << sizeof(struct Vector) << std::endl;
   std::cout << "Sizeof a std::vector<float> is " << sizeof(std::vector<float>) << std::endl;
   std::cout << "Sizeof a Node is " << sizeof(struct Hnsw::Node) << std::endl;
+
+  std::cout << "memory size before allocations..." << std::endl;
+
+  PrintMemUsage();
 
   std::cout << "allocating " << count << " vectors..." << std::endl;
 
@@ -410,7 +473,7 @@ void SizeTest(size_t count, size_t vector_length, size_t neighbors_per_node) {
 
   PrintMemUsage();
 
-  std::cout << "faulting-in " << count << " node neighbors..." << std::endl;
+  std::cout << "faulting-in " << neighbors_per_node << " neighbors per node..." << std::endl;
   
   for (size_t c = 0; c < count; ++c)
     for (size_t n = 0; n < neighbors_per_node; ++n)
@@ -420,6 +483,6 @@ void SizeTest(size_t count, size_t vector_length, size_t neighbors_per_node) {
 }
 
 int main(int argc, char **argv) {
-  SizeTest(256, 4, 2);
+  SizeTest(1000000, 25, 64);
   return 0;
 }
